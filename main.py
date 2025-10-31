@@ -12,7 +12,7 @@ VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 
 DATA_DIR = "data"
 SENT_FILE = os.path.join(DATA_DIR, "sent_links.txt")
-LOG_FILE = "miza_news_v21.log"
+LOG_FILE = "miza_news_v22.log"
 os.makedirs(DATA_DIR, exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -105,7 +105,7 @@ def get_youtube_thumbnail(link):
     return None
 
 # ======================
-# FETCH FEEDS
+# FETCH FEEDS (RSS + YOUTUBE)
 # ======================
 def fetch_new_items(hours=48):
     cutoff = datetime.now(VN_TZ) - timedelta(hours=hours)
@@ -122,14 +122,13 @@ def fetch_new_items(hours=48):
                     continue
                 link = normalize_link(e.get("link", ""))
                 norm_title = normalize_title(title)
-
                 if link in sent_links or norm_title in seen_titles:
                     continue
 
                 pub = parse_date(e)
                 age_min = (datetime.now(VN_TZ) - pub).total_seconds() / 60
 
-                # Bộ lọc
+                # Bộ lọc tin liên quan
                 if not re.search(r"\b(Miza|MZG|Giấy Miza)\b", title, re.IGNORECASE):
                     continue
                 if "youtube.com" in link and not is_vietnamese_text(title):
@@ -137,7 +136,7 @@ def fetch_new_items(hours=48):
                 if pub < cutoff:
                     continue
 
-                # Gửi chỉ khi mới trong 5 phút
+                # Gửi tin mới trong vòng 5 phút
                 if age_min <= 5:
                     seen_titles.add(norm_title)
                     new_items.append({
@@ -155,15 +154,63 @@ def fetch_new_items(hours=48):
     return new_items
 
 # ======================
+# FETCH TIKTOK (RapidAPI)
+# ======================
+def fetch_tiktok_videos():
+    """Lấy video TikTok mới nhất về Miza trong 5 phút"""
+    url = "https://tiktok-scraper7.p.rapidapi.com/feed/search"
+    headers = {
+        "X-RapidAPI-Key": os.getenv("RAPID_API_KEY"),
+        "X-RapidAPI-Host": "tiktok-scraper7.p.rapidapi.com"
+    }
+    params = {"keywords": "Miza MZG Giấy Miza Việt Nam", "region": "VN", "count": "10"}
+
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        data = res.json()
+    except Exception as e:
+        logging.error(f"TikTok API error: {e}")
+        return []
+
+    sent_links = load_sent()
+    new_videos = []
+    now = datetime.now(VN_TZ)
+
+    for v in data.get("data", {}).get("videos", []):
+        title = v.get("title") or v.get("desc", "")
+        link = v.get("webVideoUrl") or ""
+        pub_time = datetime.fromtimestamp(v.get("createTime", 0), tz=VN_TZ)
+        age_min = (now - pub_time).total_seconds() / 60
+
+        if (
+            age_min <= 5
+            and link not in sent_links
+            and re.search(r"(Miza|MZG|Giấy Miza)", title, re.IGNORECASE)
+            and is_vietnamese_text(title)
+        ):
+            new_videos.append({
+                "title": title,
+                "link": link,
+                "date": pub_time,
+                "source": "TikTok"
+            })
+            save_sent(link)
+
+    return new_videos
+
+# ======================
 # JOBS
 # ======================
 def job_realtime_check():
     new_items = fetch_new_items(hours=48)
-    if not new_items:
+    new_tiktok = fetch_tiktok_videos()
+    all_items = new_items + new_tiktok
+
+    if not all_items:
         logging.info("⏳ Không có tin mới trong 5 phút qua.")
         return
 
-    for item in new_items:
+    for item in sorted(all_items, key=lambda x: x["date"], reverse=True):
         link = shorten_url(item["link"])
         caption = f"🆕 <b>{item['title']}</b>\n🗓️ {item['date'].strftime('%H:%M %d/%m/%Y')}\n({item['source']})\n🔗 {link}"
         thumbnail = None
@@ -189,7 +236,7 @@ def job_daily_summary():
 # MAIN LOOP
 # ======================
 def main():
-    send_telegram("🚀 Miza News Bot v21 khởi động! (Gửi tin mới trong 5 phút, tránh trùng lặp ✅)")
+    send_telegram("🚀 Miza News Bot v22 khởi động! (Tích hợp TikTok + YouTube + RSS + chống trùng lặp ✅)")
     logging.info("Bot started.")
 
     job_realtime_check()
