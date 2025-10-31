@@ -1,6 +1,7 @@
-import os, time, logging, requests, feedparser, schedule, pytz, re
+import os, time, logging, requests, feedparser, schedule, pytz, re, threading
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from flask import Flask
 
 # ======================
 # CONFIG
@@ -12,7 +13,7 @@ VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 
 DATA_DIR = "data"
 SENT_FILE = os.path.join(DATA_DIR, "sent_links.txt")
-LOG_FILE = "miza_news_v22.log"
+LOG_FILE = "miza_news_v25.log"
 os.makedirs(DATA_DIR, exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -56,10 +57,10 @@ def save_sent(link):
 # RSS SOURCES
 # ======================
 RSS_FEEDS = {
-    "Google News": "https://news.google.com/rss/search?q=(Miza+OR+MZG+OR+Giấy+Miza)&hl=vi&gl=VN&ceid=VN:vi",
-    "Bing News": "https://www.bing.com/news/search?q=Miza+MZG&format=rss",
+    "Google News": "https://news.google.com/rss/search?q=(Miza+OR+MZG+OR+Giấy+Miza+OR+Miza+Corp)&hl=vi&gl=VN&ceid=VN:vi",
+    "Bing News": "https://www.bing.com/news/search?q=Miza+MZG+Miza+Corp&format=rss",
     "YouTube Channel": "https://www.youtube.com/feeds/videos.xml?channel_id=UCd2aU53aTTxxLONczZc34BA",
-    "YouTube Search (VN)": "https://www.youtube.com/feeds/videos.xml?search_query=Miza+MZG+Giấy+Miza+Việt+Nam+\"Công+ty\"+\"Giấy\"",
+    "YouTube Search (VN)": "https://www.youtube.com/feeds/videos.xml?search_query=Miza+MZG+Miza+Corp+Giấy+Miza+Việt+Nam",
     "VNExpress": "https://vnexpress.net/rss/doanh-nghiep.rss",
     "Cafef": "https://cafef.vn/rss/tai-chinh-doanh-nghiep.rss",
     "VietnamBiz": "https://vietnambiz.vn/kinh-doanh.rss"
@@ -105,13 +106,14 @@ def get_youtube_thumbnail(link):
     return None
 
 # ======================
-# FETCH FEEDS (RSS + YOUTUBE)
+# FETCH RSS + YOUTUBE
 # ======================
-def fetch_new_items(hours=48):
+def fetch_new_items(hours=72):
     cutoff = datetime.now(VN_TZ) - timedelta(hours=hours)
     sent_links = load_sent()
     seen_titles = set()
     new_items = []
+    keyword_pattern = re.compile(r"(Miza|MZG|Miza\s*Corp|Giấy\s*Miza)", re.IGNORECASE)
 
     for source, url in RSS_FEEDS.items():
         try:
@@ -128,15 +130,13 @@ def fetch_new_items(hours=48):
                 pub = parse_date(e)
                 age_min = (datetime.now(VN_TZ) - pub).total_seconds() / 60
 
-                # Bộ lọc tin liên quan
-                if not re.search(r"\b(Miza|MZG|Giấy Miza)\b", title, re.IGNORECASE):
+                if not keyword_pattern.search(title):
                     continue
                 if "youtube.com" in link and not is_vietnamese_text(title):
                     continue
                 if pub < cutoff:
                     continue
 
-                # Gửi tin mới trong vòng 5 phút
                 if age_min <= 5:
                     seen_titles.add(norm_title)
                     new_items.append({
@@ -154,57 +154,120 @@ def fetch_new_items(hours=48):
     return new_items
 
 # ======================
-# FETCH TIKTOK (RapidAPI)
+# FETCH TIKTOK
 # ======================
 def fetch_tiktok_videos():
-    """Lấy video TikTok mới nhất về Miza trong 5 phút"""
-    url = "https://tiktok-scraper7.p.rapidapi.com/feed/search"
+    """Lấy video TikTok mới nhất (Search + User @miza.group4)"""
     headers = {
         "X-RapidAPI-Key": os.getenv("RAPID_API_KEY"),
         "X-RapidAPI-Host": "tiktok-scraper7.p.rapidapi.com"
     }
-    params = {"keywords": "Miza MZG Giấy Miza Việt Nam", "region": "VN", "count": "10"}
 
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        data = res.json()
-    except Exception as e:
-        logging.error(f"TikTok API error: {e}")
-        return []
-
+    now = datetime.now(VN_TZ)
     sent_links = load_sent()
     new_videos = []
-    now = datetime.now(VN_TZ)
+    keyword_pattern = re.compile(r"(Miza|MZG|Miza\s*Corp|Giấy\s*Miza|#Miza|#MZG)", re.IGNORECASE)
 
-    for v in data.get("data", {}).get("videos", []):
+    # 1️⃣ Tìm kiếm theo từ khóa
+    try:
+        search_url = "https://tiktok-scraper7.p.rapidapi.com/feed/search"
+        params = {"keywords": "Miza MZG MizaCorp Giấy Miza Việt Nam", "count": "30"}
+        r1 = requests.get(search_url, headers=headers, params=params, timeout=10)
+        data1 = r1.json().get("data", {}).get("videos", [])
+    except Exception as e:
+        logging.error(f"TikTok Search API error: {e}")
+        data1 = []
+
+    # 2️⃣ Lấy video từ user @miza.group4
+    try:
+        user_url = "https://tiktok-scraper7.p.rapidapi.com/user/posts"
+        params_user = {"unique_id": "miza.group4", "count": "10"}
+        r2 = requests.get(user_url, headers=headers, params=params_user, timeout=10)
+        data2 = r2.json().get("data", {}).get("videos", [])
+    except Exception as e:
+        logging.error(f"TikTok User API error: {e}")
+        data2 = []
+
+    # 3️⃣ Hợp nhất hai nguồn
+    all_videos = data1 + data2
+
+    for v in all_videos:
         title = v.get("title") or v.get("desc", "")
         link = v.get("webVideoUrl") or ""
         pub_time = datetime.fromtimestamp(v.get("createTime", 0), tz=VN_TZ)
         age_min = (now - pub_time).total_seconds() / 60
 
-        if (
-            age_min <= 5
-            and link not in sent_links
-            and re.search(r"(Miza|MZG|Giấy Miza)", title, re.IGNORECASE)
-            and is_vietnamese_text(title)
-        ):
-            new_videos.append({
-                "title": title,
+        if not link or link in sent_links:
+            continue
+        if not keyword_pattern.search(title):
+            continue
+        if age_min > 72 * 60:  # trong 72 giờ
+            continue
+
+        new_videos.append({
+            "title": title,
+            "link": link,
+            "date": pub_time,
+            "source": "TikTok"
+        })
+        save_sent(link)
+
+    logging.info(f"✅ TikTok: tìm thấy {len(new_videos)} video mới.")
+    return new_videos
+
+# ======================
+# FETCH FACEBOOK (OPTIONAL)
+# ======================
+def fetch_facebook_posts():
+    access_token = os.getenv("FACEBOOK_ACCESS_TOKEN")
+    page_id = os.getenv("FACEBOOK_PAGE_ID")
+    if not access_token or not page_id:
+        return []
+
+    url = f"https://graph.facebook.com/v17.0/{page_id}/posts"
+    params = {
+        "fields": "message,created_time,permalink_url",
+        "limit": 10,
+        "access_token": access_token
+    }
+
+    try:
+        res = requests.get(url, params=params, timeout=10)
+        data = res.json()
+    except Exception as e:
+        logging.error(f"Facebook API error: {e}")
+        return []
+
+    sent_links = load_sent()
+    new_posts = []
+    now = datetime.now(VN_TZ)
+    keyword_pattern = re.compile(r"(Miza|MZG|Miza\s*Corp|Giấy\s*Miza)", re.IGNORECASE)
+
+    for post in data.get("data", []):
+        msg = post.get("message", "")
+        link = post.get("permalink_url", "")
+        created = datetime.fromisoformat(post.get("created_time").replace("Z", "+00:00")).astimezone(VN_TZ)
+        age_min = (now - created).total_seconds() / 60
+
+        if age_min <= 5 and keyword_pattern.search(msg) and link not in sent_links:
+            new_posts.append({
+                "title": msg[:80] + "..." if len(msg) > 80 else msg,
                 "link": link,
-                "date": pub_time,
-                "source": "TikTok"
+                "date": created,
+                "source": "Facebook"
             })
             save_sent(link)
 
-    return new_videos
+    return new_posts
 
 # ======================
 # JOBS
 # ======================
 def job_realtime_check():
-    new_items = fetch_new_items(hours=48)
+    new_items = fetch_new_items(hours=72)
     new_tiktok = fetch_tiktok_videos()
-    all_items = new_items + new_tiktok
+    new_facebook = fetch_facebook_posts()
+    all_items = new_items + new_tiktok + new_facebook
 
     if not all_items:
         logging.info("⏳ Không có tin mới trong 5 phút qua.")
@@ -233,10 +296,23 @@ def job_daily_summary():
     send_telegram(header + body)
 
 # ======================
-# MAIN LOOP
+# FLASK SERVER (Render)
+# ======================
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "🚀 Miza News Bot v25 is running successfully!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# ======================
+# MAIN
 # ======================
 def main():
-    send_telegram("🚀 Miza News Bot v22 khởi động! (Tích hợp TikTok + YouTube + RSS + chống trùng lặp ✅)")
+    send_telegram("🚀 Miza News Bot v25 khởi động! (72h + TikTok User + Flask ✅)")
     logging.info("Bot started.")
 
     job_realtime_check()
@@ -250,4 +326,5 @@ def main():
         time.sleep(60)
 
 if __name__ == "__main__":
+    threading.Thread(target=run_flask).start()
     main()
