@@ -1,4 +1,4 @@
-import os, time, logging, requests, feedparser, schedule, pytz, threading, re
+import os, time, logging, requests, feedparser, schedule, pytz, re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -12,7 +12,7 @@ VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 
 DATA_DIR = "data"
 SENT_FILE = os.path.join(DATA_DIR, "sent_links.txt")
-LOG_FILE = "miza_news_v19.log"
+LOG_FILE = "miza_news_v21.log"
 os.makedirs(DATA_DIR, exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -20,7 +20,6 @@ logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s -
 # TELEGRAM
 # ======================
 def send_telegram(msg, image_url=None):
-    """Gửi tin nhắn hoặc ảnh thumbnail kèm caption"""
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     for chat_id in CHAT_IDS:
         try:
@@ -59,7 +58,8 @@ def save_sent(link):
 RSS_FEEDS = {
     "Google News": "https://news.google.com/rss/search?q=(Miza+OR+MZG+OR+Giấy+Miza)&hl=vi&gl=VN&ceid=VN:vi",
     "Bing News": "https://www.bing.com/news/search?q=Miza+MZG&format=rss",
-    "YouTube": "https://www.youtube.com/feeds/videos.xml?channel_id=UCd2aU53aTTxxLONczZc34BA",
+    "YouTube Channel": "https://www.youtube.com/feeds/videos.xml?channel_id=UCd2aU53aTTxxLONczZc34BA",
+    "YouTube Search (VN)": "https://www.youtube.com/feeds/videos.xml?search_query=Miza+MZG+Giấy+Miza+Việt+Nam+\"Công+ty\"+\"Giấy\"",
     "VNExpress": "https://vnexpress.net/rss/doanh-nghiep.rss",
     "Cafef": "https://cafef.vn/rss/tai-chinh-doanh-nghiep.rss",
     "VietnamBiz": "https://vietnambiz.vn/kinh-doanh.rss"
@@ -95,15 +95,13 @@ def shorten_url(url):
     except:
         return url
 
-# ======================
-# YOUTUBE THUMBNAIL
-# ======================
+def is_vietnamese_text(text):
+    return bool(re.search(r"[áàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ]", text, re.IGNORECASE))
+
 def get_youtube_thumbnail(link):
-    """Lấy ảnh thumbnail từ link YouTube"""
     match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", link)
     if match:
-        video_id = match.group(1)
-        return f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+        return f"https://img.youtube.com/vi/{match.group(1)}/hqdefault.jpg"
     return None
 
 # ======================
@@ -129,7 +127,18 @@ def fetch_new_items(hours=48):
                     continue
 
                 pub = parse_date(e)
-                if pub >= cutoff and re.search(r"\b(Miza|MZG|Giấy Miza)\b", title, re.IGNORECASE):
+                age_min = (datetime.now(VN_TZ) - pub).total_seconds() / 60
+
+                # Bộ lọc
+                if not re.search(r"\b(Miza|MZG|Giấy Miza)\b", title, re.IGNORECASE):
+                    continue
+                if "youtube.com" in link and not is_vietnamese_text(title):
+                    continue
+                if pub < cutoff:
+                    continue
+
+                # Gửi chỉ khi mới trong 5 phút
+                if age_min <= 5:
                     seen_titles.add(norm_title)
                     new_items.append({
                         "title": title,
@@ -138,6 +147,7 @@ def fetch_new_items(hours=48):
                         "source": source
                     })
                     save_sent(link)
+
         except Exception as e:
             logging.error(f"RSS lỗi {source}: {e}")
 
@@ -150,7 +160,7 @@ def fetch_new_items(hours=48):
 def job_realtime_check():
     new_items = fetch_new_items(hours=48)
     if not new_items:
-        logging.info("⏳ Không có tin mới trong 48h qua.")
+        logging.info("⏳ Không có tin mới trong 5 phút qua.")
         return
 
     for item in new_items:
@@ -179,14 +189,14 @@ def job_daily_summary():
 # MAIN LOOP
 # ======================
 def main():
-    send_telegram("🚀 Miza News Bot v19 khởi động! (Hỗ trợ preview video YouTube 🎥)")
+    send_telegram("🚀 Miza News Bot v21 khởi động! (Gửi tin mới trong 5 phút, tránh trùng lặp ✅)")
     logging.info("Bot started.")
 
     job_realtime_check()
     job_daily_summary()
 
     schedule.every().day.at("09:00").do(job_daily_summary)
-    schedule.every(20).minutes.do(job_realtime_check)
+    schedule.every(5).minutes.do(job_realtime_check)
 
     while True:
         schedule.run_pending()
