@@ -9,11 +9,12 @@ from flask import Flask
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_IDS = [i.strip() for i in os.getenv("TELEGRAM_CHAT_IDS", "").split(",") if i.strip()]
+RAPID_KEY = os.getenv("RAPID_API_KEY")
 VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 
 DATA_DIR = "data"
 SENT_FILE = os.path.join(DATA_DIR, "sent_links.txt")
-LOG_FILE = "miza_news_v27.log"
+LOG_FILE = "miza_monitor_v29.log"
 os.makedirs(DATA_DIR, exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -21,22 +22,17 @@ logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s -
 # TELEGRAM
 # ======================
 def send_telegram(msg, image_url=None):
-    """Gửi tin nhắn Telegram (có thể kèm ảnh thumbnail YouTube)."""
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     for chat_id in CHAT_IDS:
         try:
             if image_url:
-                requests.post(
-                    f"{base_url}/sendPhoto",
-                    json={"chat_id": chat_id, "photo": image_url, "caption": msg, "parse_mode": "HTML"},
-                    timeout=10
-                )
+                requests.post(f"{base_url}/sendPhoto",
+                              json={"chat_id": chat_id, "photo": image_url, "caption": msg, "parse_mode": "HTML"},
+                              timeout=10)
             else:
-                requests.post(
-                    f"{base_url}/sendMessage",
-                    json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
-                    timeout=10
-                )
+                requests.post(f"{base_url}/sendMessage",
+                              json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
+                              timeout=10)
             logging.info(f"✅ Sent to {chat_id}")
         except Exception as e:
             logging.error(f"❌ Telegram error: {e}")
@@ -59,39 +55,13 @@ def save_sent(link):
 # ======================
 RSS_FEEDS = {
     "Google News": "https://news.google.com/rss/search?q=(Miza+OR+MZG+OR+Giấy+Miza+OR+Miza+Corp)&hl=vi&gl=VN&ceid=VN:vi",
-    "Bing News": "https://www.bing.com/news/search?q=Miza+MZG+Miza+Corp&format=rss",
     "YouTube Channel": "https://www.youtube.com/feeds/videos.xml?channel_id=UCd2aU53aTTxxLONczZc34BA",
-    # ✅ bổ sung search feed để bắt video chưa kịp lên RSS channel
-    "YouTube Search": "https://www.youtube.com/feeds/videos.xml?search_query=Miza+Group+MZG+Miza+Corp+Giấy+Miza",
-    "VNExpress": "https://vnexpress.net/rss/doanh-nghiep.rss",
-    "Cafef": "https://cafef.vn/rss/tai-chinh-doanh-nghiep.rss",
-    "VietnamBiz": "https://vietnambiz.vn/kinh-doanh.rss"
+    "YouTube Search": "https://www.youtube.com/feeds/videos.xml?search_query=Miza+Group+MZG+Miza+Corp+Giấy+Miza"
 }
 
 # ======================
 # UTILS
 # ======================
-def normalize_link(url):
-    return re.sub(r"(&utm_[^=]+=[^&]+)", "", url).strip()
-
-def normalize_title(title):
-    title = title.lower()
-    title = re.sub(r"[^a-z0-9áàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ ]", "", title)
-    return re.sub(r"\s+", " ", title).strip()
-
-def parse_date(entry):
-    """Xử lý ngày đăng từ RSS, fallback nếu thiếu."""
-    try:
-        if entry.get("published_parsed"):
-            dt = datetime(*entry.published_parsed[:6], tzinfo=pytz.utc)
-        elif entry.get("updated_parsed"):
-            dt = datetime(*entry.updated_parsed[:6], tzinfo=pytz.utc)
-        else:
-            dt = datetime.now(pytz.utc)
-        return dt.astimezone(VN_TZ)
-    except Exception:
-        return datetime.now(VN_TZ)
-
 def shorten_url(url):
     try:
         res = requests.get(f"https://is.gd/create.php?format=simple&url={url}", timeout=5)
@@ -105,16 +75,26 @@ def get_youtube_thumbnail(link):
         return f"https://img.youtube.com/vi/{match.group(1)}/hqdefault.jpg"
     return None
 
+def parse_date(entry):
+    try:
+        if entry.get("published_parsed"):
+            dt = datetime(*entry.published_parsed[:6], tzinfo=pytz.utc)
+        elif entry.get("updated_parsed"):
+            dt = datetime(*entry.updated_parsed[:6], tzinfo=pytz.utc)
+        else:
+            dt = datetime.now(pytz.utc)
+        return dt.astimezone(VN_TZ)
+    except Exception:
+        return datetime.now(VN_TZ)
+
 # ======================
 # FETCH RSS
 # ======================
-def fetch_new_items(days=5):
-    """Lấy tin bài và video trong 5 ngày gần nhất."""
+def fetch_rss_items(days=5):
     cutoff = datetime.now(VN_TZ) - timedelta(days=days)
     sent_links = load_sent()
-    seen_titles = set()
     new_items = []
-    keyword_pattern = re.compile(r"(Miza|MZG|Miza\s*Corp|Giấy\s*Miza|Miza\s*Group)", re.IGNORECASE)
+    keyword_pattern = re.compile(r"(Miza|MZG|Miza\s*Group|Giấy\s*Miza|Miza\s*Corp)", re.IGNORECASE)
 
     for source, url in RSS_FEEDS.items():
         try:
@@ -123,60 +103,120 @@ def fetch_new_items(days=5):
                 title = e.get("title", "").strip()
                 if not title:
                     continue
-
-                link = normalize_link(e.get("link", ""))
-                norm_title = normalize_title(title)
-                if link in sent_links or norm_title in seen_titles:
-                    continue
-
+                link = e.get("link", "").strip()
                 pub = parse_date(e)
-                if pub < cutoff:
+                if link in sent_links or pub < cutoff or not keyword_pattern.search(title):
                     continue
-                if not keyword_pattern.search(title):
-                    continue
-
-                seen_titles.add(norm_title)
-                new_items.append({
-                    "title": title,
-                    "link": link,
-                    "date": pub,
-                    "source": source
-                })
+                new_items.append({"title": title, "link": link, "date": pub, "source": source})
                 save_sent(link)
-                logging.info(f"[{source}] ✅ Phát hiện tin mới: {title} ({pub.strftime('%d/%m %H:%M')})")
-
+                logging.info(f"[{source}] ✅ Phát hiện: {title}")
         except Exception as e:
-            logging.error(f"❌ RSS lỗi {source}: {e}")
-
-    new_items.sort(key=lambda x: x["date"], reverse=True)
+            logging.error(f"RSS error {source}: {e}")
     return new_items
 
 # ======================
-# JOBS
+# FACEBOOK (RSSHub)
 # ======================
-def job_realtime_check():
-    new_items = fetch_new_items(days=5)
-    if not new_items:
-        logging.info("⏳ Không có tin mới trong 5 ngày qua.")
+def fetch_facebook_posts(page="mizagroup.vn"):
+    try:
+        url = f"https://rsshub.app/facebook/page/{page}"
+        feed = feedparser.parse(url)
+        items = []
+        cutoff = datetime.now(VN_TZ) - timedelta(days=5)
+        for e in feed.entries:
+            title = e.get("title", "Bài đăng Facebook")
+            link = e.get("link", "")
+            pub = parse_date(e)
+            if pub < cutoff:
+                continue
+            items.append({"title": title, "link": link, "date": pub, "source": "Facebook"})
+            save_sent(link)
+        logging.info(f"✅ Facebook: {len(items)} bài.")
+        return items
+    except Exception as e:
+        logging.error(f"Facebook error: {e}")
+        return []
+
+# ======================
+# TIKTOK (RapidAPI)
+# ======================
+def fetch_tiktok_videos():
+    headers = {
+        "x-rapidapi-key": RAPID_KEY,
+        "x-rapidapi-host": "tiktok-scraper7.p.rapidapi.com"
+    }
+    results = []
+    try:
+        r = requests.get("https://tiktok-scraper7.p.rapidapi.com/feed/search",
+                         params={"keywords": "Miza MZG MizaCorp Giấy Miza Việt Nam", "count": "20"},
+                         headers=headers, timeout=10)
+        data = r.json()
+        for v in data.get("data", {}).get("videos", []):
+            link = v.get("webVideoUrl")
+            title = v.get("title") or v.get("desc", "")
+            pub = datetime.fromtimestamp(v.get("createTime", 0), tz=VN_TZ)
+            if not link:
+                continue
+            results.append({"title": title, "link": link, "date": pub, "source": "TikTok"})
+            save_sent(link)
+        logging.info(f"✅ TikTok: {len(results)} video mới.")
+        return results
+    except Exception as e:
+        logging.error(f"TikTok error: {e}")
+        return []
+
+# ======================
+# DELAYED SEND (20 phút)
+# ======================
+def schedule_delayed_send(item):
+    """Gửi tin sau 20 phút."""
+    time.sleep(1200)
+    link = shorten_url(item["link"])
+    msg = f"🆕 <b>{item['title']}</b>\n🗓️ {item['date'].strftime('%H:%M %d/%m')}\n({item['source']})\n🔗 {link}"
+    thumb = get_youtube_thumbnail(link) if "youtube.com" in link else None
+    send_telegram(msg, image_url=thumb)
+    logging.info(f"🚀 Đã gửi sau 20 phút: {item['title']}")
+
+# ======================
+# DAILY REPORT 9AM
+# ======================
+def job_daily_report():
+    logging.info("📢 Tạo báo cáo 9h sáng...")
+    rss_items = fetch_rss_items()
+    fb_items = fetch_facebook_posts()
+    tiktok_items = fetch_tiktok_videos()
+    all_items = rss_items + fb_items + tiktok_items
+
+    now = datetime.now(VN_TZ)
+    header = f"🗞️ <b>BÁO CÁO MIZA – {now.strftime('%d/%m/%Y')}</b>\n⏰ {now.strftime('%H:%M')} | Tổng hợp YouTube, TikTok, Facebook, Google News\n\n"
+
+    if not all_items:
+        send_telegram(header + "❗ Không có tin mới trong 5 ngày qua.")
+        logging.info("❗ Không có tin mới để báo cáo.")
         return
 
-    for item in new_items:
+    # Gửi báo cáo tổng hợp
+    all_items.sort(key=lambda x: x["date"], reverse=True)
+    body = ""
+    for i, item in enumerate(all_items[:20], 1):
         link = shorten_url(item["link"])
-        caption = f"🆕 <b>{item['title']}</b>\n🗓️ {item['date'].strftime('%H:%M %d/%m/%Y')}\n({item['source']})\n🔗 {link}"
-        thumbnail = None
-        if "youtube.com" in link:
-            thumbnail = get_youtube_thumbnail(link)
-        send_telegram(caption, image_url=thumbnail)
-        logging.info(f"🚀 Đã gửi tin: {item['title']}")
+        body += f"{i}. <b>{item['title']}</b> ({item['source']})\n🗓️ {item['date'].strftime('%H:%M %d/%m')}\n🔗 {link}\n\n"
+    send_telegram(header + body)
+
+    # Gửi riêng từng tin mới sau 20 phút
+    for item in all_items:
+        threading.Thread(target=schedule_delayed_send, args=(item,)).start()
+
+    logging.info("✅ Báo cáo 9h sáng & schedule gửi 20 phút đã hoàn tất.")
 
 # ======================
-# FLASK SERVER (Render)
+# FLASK SERVER
 # ======================
 app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return "🚀 Miza News Bot v27 đang chạy ổn định! (RSS + YouTube Search ✅)", 200
+    return "🚀 Miza Monitor v29 đang hoạt động ổn định (YouTube + TikTok + Facebook + News + Delay 20 phút)", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -186,12 +226,10 @@ def run_flask():
 # MAIN
 # ======================
 def main():
-    send_telegram("🚀 Miza News Bot v27 khởi động! (YouTube Search + RSS mở rộng ✅)")
+    send_telegram("🚀 Miza Monitor v29 khởi động (YouTube + TikTok + Facebook + News + Gửi sau 20 phút).")
     logging.info("Bot started.")
-
-    job_realtime_check()  # quét lần đầu khi khởi động
-    schedule.every(5).minutes.do(job_realtime_check)  # kiểm tra tin mới mỗi 5 phút
-
+    job_daily_report()
+    schedule.every().day.at("09:00").do(job_daily_report)
     while True:
         schedule.run_pending()
         time.sleep(60)
